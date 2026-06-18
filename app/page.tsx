@@ -231,7 +231,7 @@ function PricingEditor({ form: f, set }: { form: CfgForm; set: <K extends keyof 
         <Field label="Client spread %" value={f.spread} onChange={(e) => set("spread", e.target.value)} hint="negative = better rate" />
         <Field label="Min price" value={f.minP} onChange={(e) => set("minP", e.target.value)} />
         <Field label="Max price" value={f.maxP} onChange={(e) => set("maxP", e.target.value)} hint="set min = max to pin a static price" />
-        <Field label="Platform fee (USD)" value={f.platFee} onChange={(e) => set("platFee", e.target.value)} />
+        <Field label="Service charge (USD)" value={f.platFee} onChange={(e) => set("platFee", e.target.value)} />
         <Field label="Price-lock spread %" value={f.priceLock} onChange={(e) => set("priceLock", e.target.value)} />
         <Field label="TDS %" value={f.tds} onChange={(e) => set("tds", e.target.value)} />
         <Select label="compensate_tds" value={f.compensate ? "yes" : "no"} onChange={(v) => set("compensate", v === "yes")} options={[{ value: "no", label: "No" }, { value: "yes", label: "Yes — Saber absorbs TDS" }]} />
@@ -328,7 +328,7 @@ function quoteChecks(clientLabel: string) {
   return [
     { label: `Fetching quote for ${clientLabel}`, detail: "reading the partner config" },
     { label: "Resolving payout partners", detail: "payout partner (and NRE payout partner, if set)" },
-    { label: "Applying pricing config", detail: "spread, price source, platform fee" },
+    { label: "Applying pricing config", detail: "spread, price source, service charge" },
     { label: "Issuing quote", detail: "rate locked for 30 seconds" },
   ];
 }
@@ -392,10 +392,12 @@ function PriceCard({ price, currency }: { price: Price; currency: string }) {
     <div className={`rounded-[14px] border p-5 animate-pop ${isD9 ? "border-[var(--color-accent)]" : "border-[var(--color-line)]"}`}>
       <div className="flex items-center justify-between"><span className={`inline-flex items-center h-6 px-2.5 rounded-full text-[12px] font-medium ${isD9 ? "bg-[var(--color-accent)] text-[var(--color-accent-ink)]" : "bg-[var(--color-line)] text-[var(--color-muted)]"}`}>{isD9 ? "NRE accounts" : "NRO / savings"}</span></div>
       <div className="mt-3 text-[28px] font-semibold tracking-tight">{inr(price.you_receive)}</div>
-      <div className="text-[12px] text-[var(--color-muted)]">user receives · rate {price.rate} INR/{currency}</div>
+      <div className="text-[12px] text-[var(--color-muted)]">user receives · final_price {price.final_price} INR/{currency}</div>
       <div className="mt-3 pt-3 border-t border-[var(--color-line)] space-y-1.5">
-        <Line label="Gross" value={inr(price.gross_inr)} />
-        <Line label={`Platform fee ($${price.platform_fee.usd.toFixed(2)})`} value={`− ${inr(price.platform_fee.inr)}`} />
+        <Line label="base_price" value={`${price.base_price}`} />
+        <Line label="final_price (incl. % fees + TDS)" value={`${price.final_price}`} />
+        <Line label="pre_fee_to_amount" value={inr(price.pre_fee_to_amount)} />
+        <Line label={`Service charge (${price.service_charge.amount.toFixed(2)} ${price.service_charge.currency} · flat)`} value={`− ${inr(price.service_charge.amount * price.final_price)}`} />
         <Line label="Tax (TDS)" value={tdsValue} tone={tds.applicable && !tds.compensated ? "bad" : "good"} />
       </div>
     </div>
@@ -488,9 +490,10 @@ function DoneStep({ routing, amount, currency, business, createRequest, onRestar
         <Line label="Sold" value={`${amount} ${currency}`} />
         <Line label="Payout partner" value={`${routing.partner.AggregatorName} (${routing.partner.type === "D9" ? "traditional" : "stables"})`} />
         <Line label="Account type" value={routing.account_type} />
-        <Line label="Locked rate" value={`${c.rate} INR/${currency}`} />
-        <Line label="Gross" value={inr(c.gross_inr)} />
-        <Line label={`Platform fee ($${c.platform_fee.usd.toFixed(2)})`} value={`− ${inr(c.platform_fee.inr)}`} />
+        <Line label="base_price" value={`${c.base_price} INR/${currency}`} />
+        <Line label="final_price (locked)" value={`${c.final_price} INR/${currency}`} />
+        <Line label="pre_fee_to_amount" value={inr(c.pre_fee_to_amount)} />
+        <Line label={`Service charge (${c.service_charge.amount.toFixed(2)} ${c.service_charge.currency} · flat)`} value={`− ${inr(c.service_charge.amount * c.final_price)}`} />
         <Line label="TDS" value={tdsValue} tone={tds.applicable && !tds.compensated ? "bad" : "good"} />
         <div className="pt-2 mt-1 border-t border-[var(--color-line)]"><Line label="Net to beneficiary" value={inr(c.you_receive)} /></div>
       </div>
@@ -531,18 +534,25 @@ function CalcBreakdown({ cfg, amount, isNri }: { cfg: ClientConfig; amount: numb
 }
 function CalcCard({ ex, currency }: { ex: PriceExplain; currency: string }) {
   const isD9 = ex.rail === "D9";
-  const tdsLine = !ex.tds_applicable ? "no TDS (NRI or stables tds=0)" : ex.compensated ? `1% = ₹${ex.tds_inr.toLocaleString("en-IN")}, but absorbed by Saber (compensate_tds)` : `1% × gross = − ₹${ex.tds_inr.toLocaleString("en-IN")}`;
+  const tdsLine = !ex.tds_applicable ? "no TDS (NRI or stables tds=0)" : ex.compensated ? `1% absorbed by Saber (compensate_tds), not folded in` : `× (1 − tds)`;
+  const pctFeeDetail = ex.net_platform_fee === 0 && ex.client_fee === 0
+    ? "none configured (all 0) — final_price = base_price before TDS"
+    : `× (1 − ${ex.net_platform_fee}×(1+${ex.tax_on_fee}) − ${ex.client_fee})`;
+  const payoutPreFixed = ex.pre_fee_to_amount; // amount × final_price
+  const tdsFolded = ex.tds_applicable && !ex.compensated;
+  const preTDS = tdsFolded ? Math.round((ex.final_price / (1 - ex.tds_rate)) * 100) / 100 : ex.final_price;
   return (
     <div className={`rounded-[14px] border p-5 ${isD9 ? "border-[var(--color-accent)]" : "border-[var(--color-line)]"}`}>
       <div className="text-[12px] font-semibold text-[var(--color-muted)] mb-3">{isD9 ? "NRE payout partner (D9, traditional)" : "Payout partner (RPFS, stables)"}</div>
       <ol className="space-y-2 text-[13px]">
         <CalcStep n="1" label="Source price" detail={ex.pinned ? `static OTC, pinned at ${ex.min}` : `live ${ex.source} (price stream)`} value={`${ex.source}`} />
         <CalcStep n="2" label={`Apply client spread (${pct(ex.spread)})`} detail={ex.pinned ? "ignored — pinned band overrides the spread" : `${ex.source} × (1 ${ex.spread < 0 ? "−" : "+"} ${Math.abs(ex.spread * 100).toFixed(2)}%)`} value={`${ex.post_spread}`} />
-        <CalcStep n="3" label="Clamp to band" detail={ex.pinned ? `pinned ${ex.min}` : `floor ${ex.min}, ceiling ${ex.max}`} value={`rate ${ex.rate}`} highlight />
-        <CalcStep n="4" label={`Gross = ${ex.amount} ${currency} × rate`} detail={`${ex.amount} × ${ex.rate}`} value={inr(ex.gross)} />
-        <CalcStep n="5" label={`Platform fee ($${ex.platform_fee_usd.toFixed(2)} × rate)`} detail={`$${ex.platform_fee_usd.toFixed(2)} × ${ex.rate}`} value={`− ${inr(ex.platform_fee_inr)}`} />
-        <CalcStep n="6" label="TDS" detail={tdsLine} value={ex.tds_applicable && !ex.compensated ? `− ${inr(ex.tds_inr)}` : "− ₹0"} />
-        <CalcStep n="=" label="Net to user" detail="gross − platform fee − TDS charged" value={inr(ex.net)} highlight />
+        <CalcStep n="3" label="Clamp to band → base_price" detail={ex.pinned ? `pinned ${ex.min}` : `floor ${ex.min}, ceiling ${ex.max}`} value={`${ex.base_price}`} highlight />
+        <CalcStep n="4" label="Fold % fees (platform − discount, GST, client_fee)" detail={pctFeeDetail} value={`${preTDS}`} />
+        <CalcStep n="5" label="Fold TDS → final_price" detail={tdsLine} value={`${ex.final_price}`} highlight />
+        <CalcStep n="6" label={`pre_fee_to_amount = ${ex.amount} ${currency} × final_price`} detail={`${ex.amount} × ${ex.final_price}`} value={inr(payoutPreFixed)} />
+        <CalcStep n="7" label={`Service charge (${ex.service_charge_amount.toFixed(2)} ${ex.service_charge_currency} · flat, separate object)`} detail="not folded into final_price — charged in USDT, over and above" value={`− ${inr(ex.service_charge_inr)}`} />
+        <CalcStep n="=" label="Net to user (to_amount)" detail={`(${ex.amount} − ${ex.service_charge_amount.toFixed(2)}) × final_price`} value={inr(ex.net)} highlight />
       </ol>
     </div>
   );

@@ -144,6 +144,28 @@ export function railRate(cfg: ClientConfig, rail: PartnerType) {
   return r2(fee.min_price === fee.max_price ? fee.min_price : Math.max(fee.min_price, Math.min(fee.max_price, post)));
 }
 
+/*
+  final_price — the effective per-unit rate after the percentage fees and tax,
+  built on base_price (the clamped post-spread railRate). Mirrors the backend:
+
+    netPlatformFee = platform_fee - discount
+    final_price    = base_price
+                   * (1 - netPlatformFee*(1 + tax_on_fee) - client_fee)
+                   * (1 - tds)
+
+  These terms are all percentages, so final_price stays independent of ticket size.
+  The flat fixed fee (platform_fee_usd) is deliberately NOT folded in here; it is
+  applied as a separate flat line on settlement (see priceFor.you_receive).
+*/
+export function finalPrice(cfg: ClientConfig, rail: PartnerType, basePrice: number, isNri: boolean): number {
+  const pc = cfg.pricing_config;
+  const net = pc.platform_fee - pc.discount;
+  const feeFactor = 1 - (net * (1 + pc.tax_on_fee) + pc.client_fee);
+  const tdsApplies = rail === "RPFS" && pc.tds > 0 && !isNri && !pc.compensate_tds;
+  const tdsFactor = tdsApplies ? 1 - pc.tds : 1;
+  return r2(basePrice * feeFactor * tdsFactor);
+}
+
 export type Tax = {
   tds: { applicable: boolean; rate?: number; depends_on?: string; amount_inr?: number; compensated?: boolean };
 };
@@ -151,12 +173,29 @@ export type Price = {
   partner_type: PartnerType;
   partner_name: string;
   applies_to: AccountType[];
-  rate: number;
+  rate: number; // = base_price (post-spread, clamped)
+  base_price: number; // post-spread, clamped rate
+  final_price: number; // effective rate after % fees + TDS
   source_price: number;
-  gross_inr: number;
-  platform_fee: { usd: number; inr: number };
+  gross_inr: number; // amount x base_price (pre everything)
+  pre_fee_to_amount: number; // amount x final_price (receivable before the service charge)
+  service_charge: ServiceCharge; // the flat fixed fee, its own object
+  total_fee: number; // summation of fee_breakup only (the % rate inputs); excludes service_charge
+  fee_currency: string; // currency of fee_breakup / total_fee
+  fee_breakup: FeeBreakup;
   tax: Tax;
   you_receive: number;
+};
+// The flat fixed fee, reported as its own object (sibling of fee_breakup in the response).
+export type ServiceCharge = { amount: number; currency: string };
+// The percentage rate inputs, folded into final_price. total_fee is their sum (0 in the demo configs).
+export type FeeBreakup = {
+  platform_fee: number; // fraction
+  network_fee: number;
+  client_fee: number; // fraction
+  discount: number; // fraction
+  tax_on_fee: number; // fraction (GST on platform fee)
+  tds: number; // fraction
 };
 
 function partnerForRail(cfg: ClientConfig, rail: PartnerType): Partner | undefined {
@@ -167,27 +206,46 @@ function partnerForRail(cfg: ClientConfig, rail: PartnerType): Partner | undefin
 
 export function priceFor(cfg: ClientConfig, rail: PartnerType, amount: number, isNri: boolean): Price {
   const pc = cfg.pricing_config;
-  const rate = railRate(cfg, rail);
+  const rate = railRate(cfg, rail); // base_price
+  const finalRate = finalPrice(cfg, rail, rate, isNri); // effective rate, % fees + TDS folded in
   const gross = r0(amount * rate);
-  const feeInr = r0(pc.platform_fee_usd * rate);
+  const preFee = r0(amount * finalRate); // receivable before the service charge (amount x final_price)
+  const svcAmt = pc.platform_fee_usd; // flat fixed fee, e.g. 0.30
   const isRpfs = rail === "RPFS";
   const tdsApplicable = isRpfs && pc.tds > 0 && !isNri;
   const tdsRaw = tdsApplicable ? r0(gross * pc.tds) : 0;
   const compensated = !!pc.compensate_tds;
-  const tdsCharged = compensated ? 0 : tdsRaw;
   const partner = partnerForRail(cfg, rail);
+  // Off-ramp demo: the fee is charged in USDT, over and above the rate (US-9 / appendix).
+  const service_charge: ServiceCharge = { amount: svcAmt, currency: "USDT" };
+  // fee_breakup carries only the percentage rate inputs (folded into final_price); 0 in these configs.
+  const fee_breakup: FeeBreakup = {
+    platform_fee: pc.platform_fee,
+    network_fee: 0,
+    client_fee: pc.client_fee,
+    discount: pc.discount,
+    tax_on_fee: pc.tax_on_fee,
+    tds: 0,
+  };
+  const total_fee = fee_breakup.platform_fee + fee_breakup.network_fee + fee_breakup.client_fee + fee_breakup.tax_on_fee + fee_breakup.tds - fee_breakup.discount;
   return {
     partner_type: rail,
     partner_name: partner ? `${partner.AggregatorName} (${rail}, ${rail === "D9" ? "traditional" : "stables"})` : rail,
     applies_to: rail === "D9" ? ["NRE"] : ["NRO", "SAVINGS"],
     rate,
+    base_price: rate,
+    final_price: finalRate,
     source_price: rail === "D9" ? cfg._source.d9 : cfg._source.stables,
     gross_inr: gross,
-    platform_fee: { usd: pc.platform_fee_usd, inr: feeInr },
+    pre_fee_to_amount: preFee,
+    service_charge,
+    total_fee,
+    fee_currency: "INR",
+    fee_breakup,
     tax: isRpfs
       ? { tds: { applicable: tdsApplicable, rate: pc.tds, depends_on: "is_nri", amount_inr: tdsRaw, compensated } }
       : { tds: { applicable: false } },
-    you_receive: gross - feeInr - tdsCharged,
+    you_receive: r0((amount - svcAmt) * finalRate), // service charge deducted in crypto, then converted
   };
 }
 
@@ -200,11 +258,18 @@ export type PriceExplain = {
   pinned: boolean;
   min: number;
   max: number;
-  rate: number;
+  rate: number; // base_price
+  base_price: number;
+  final_price: number; // effective rate after % fees + TDS
+  net_platform_fee: number; // platform_fee - discount (fraction)
+  client_fee: number;
+  tax_on_fee: number;
   amount: number;
   gross: number;
-  platform_fee_usd: number;
-  platform_fee_inr: number;
+  pre_fee_to_amount: number; // amount x final_price
+  service_charge_amount: number; // flat fixed fee, e.g. 0.30
+  service_charge_currency: string; // USDT (off-ramp)
+  service_charge_inr: number; // INR impact of the service charge (amount x final_price terms)
   tds_rate: number;
   tds_inr: number;
   tds_applicable: boolean;
@@ -225,10 +290,17 @@ export function explainPrice(cfg: ClientConfig, rail: PartnerType, amount: numbe
     min: fee.min_price,
     max: fee.max_price,
     rate: p.rate,
+    base_price: p.base_price,
+    final_price: p.final_price,
+    net_platform_fee: cfg.pricing_config.platform_fee - cfg.pricing_config.discount,
+    client_fee: cfg.pricing_config.client_fee,
+    tax_on_fee: cfg.pricing_config.tax_on_fee,
     amount,
     gross: p.gross_inr,
-    platform_fee_usd: p.platform_fee.usd,
-    platform_fee_inr: p.platform_fee.inr,
+    pre_fee_to_amount: p.pre_fee_to_amount,
+    service_charge_amount: p.service_charge.amount,
+    service_charge_currency: p.service_charge.currency,
+    service_charge_inr: r0(p.service_charge.amount * p.final_price),
     tds_rate: cfg.pricing_config.tds,
     tds_inr: p.tax.tds.amount_inr ?? 0,
     tds_applicable: p.tax.tds.applicable,
@@ -284,10 +356,18 @@ export function toQuoteResponse(q: Quote) {
     to_currency: q.to_currency,
     from_amount: q.from_amount,
     is_nri: q.is_nri,
+    // Matches the live quote-response contract: base_price + final_price are the rate;
+    // total_fee is the sum of fee_breakup (% inputs), and the flat fee is its own
+    // service_charge { amount, currency } object, sibling of fee_breakup.
     prices: q.prices.map((p) => ({
-      rate: p.rate,
-      amount: { gross: p.gross_inr, net_to_user: p.you_receive, currency: "INR" },
-      platform_fee: { usd: p.platform_fee.usd },
+      base_price: p.base_price,
+      final_price: p.final_price,
+      pre_fee_to_amount: p.pre_fee_to_amount,
+      to_amount: p.you_receive,
+      total_fee: p.total_fee,
+      fee_currency: p.fee_currency,
+      fee_breakup: p.fee_breakup,
+      service_charge: p.service_charge,
       tax: { tds: { applicable: p.tax.tds.applicable, rate: p.tax.tds.rate ?? 0 } },
     })),
   };

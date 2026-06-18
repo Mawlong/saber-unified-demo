@@ -11,12 +11,12 @@ behind a collapsible "Engineering view" on each step.
 ## The flow (six steps)
 
 1. **Config** — pick a client. Shows the client-partner mapping, routing rule, NRE-enabled, pricing,
-   and the $0.30 platform fee. This is the configuration the quote and routing read from.
+   and the $0.30 service charge. This is the configuration the quote and routing read from.
 2. **Quote input** — sell amount (USDT), transaction type (C2C/C2B/B2C/B2B), `is_nri`. Defaults filled.
 3. **Quote loader** — animated, step by step: fetching the quote for the client, resolving the
    available partners (RPFS, D9) and config, applying pricing, issuing a quote with a 30s lock.
 4. **Quote** — easy-to-read. Up to two prices under one `quote_id` (D9 / traditional and RPFS / stables),
-   each showing the rate, what the user receives, the $0.30 platform fee, and the tax (TDS). Conditions
+   each showing the rate, what the user receives, the $0.30 service charge, and the tax (TDS). Conditions
    shown as chips.
 5. **Create** — one fat call. No user or bank exists yet; both are created here. Sender (Travel Rule
    originator) and receiver + bank (Travel Rule beneficiary) inline. `quote_id` auto-passed. Defaults filled.
@@ -28,7 +28,7 @@ behind a collapsible "Engineering view" on each step.
 
 - PRD "Quote and Transaction Redesign" (Confluence 2411364431): simplified quote (rate + platform fee +
   tax only), two prices, fat create-transaction with no prerequisites, RPFS vs D9 routing across
-  first/third party + NRI, $0.30 platform fee.
+  first/third party + NRI, $0.30 service charge.
 - 2026-06-16 product discussion MoM.
 - wiki/30 Pricing/Pricing Overview; Saber live docs (get-sell-quote, create-pool-sell-transaction).
 
@@ -37,8 +37,8 @@ behind a collapsible "Engineering view" on each step.
 - Two partner types: RPFS (stables, onshore, 1% TDS when recipient is resident) and D9 (traditional,
   offshore, never TDS). TDS = `partner == RPFS AND is_nri == false`.
 - Routing rules per client: `BY_ACCOUNT_TYPE` (NRE → D9, else RPFS), `ALL_D9`, `BEST_RATE` (higher net wins).
-- Pricing: `final = clamp(source * (1 + client_spread), min, max)`. Demo numbers: RPFS 86.00, D9 86.43.
-- Platform fee: flat $0.30 per transaction, shown in INR at the rail rate.
+- Pricing: `base_price = clamp(source * (1 + client_spread), min, max)`, then `final_price = base_price × (1 − netPlatformFee×(1+tax_on_fee) − client_fee) × (1 − tds)` (effective rate; matches the live quote response's `base_price` / `final_price` / `fee_breakup`). Demo numbers: RPFS 86.00, D9 86.43.
+- Service charge: flat $0.30 per transaction, kept OUT of `final_price` and reported as its own object `service_charge { amount, currency }` (sibling of `fee_breakup`), charged in USDT on off-ramp. `total_fee` is the sum of `fee_breakup` (the % rate inputs) only. See the Fixed Fee PRD appendix.
 - Everything is computed client-side (pure functions in `lib/transactions.ts`); no server round-trips,
   so the demo is robust on stage. The "Engineering view" shows the request/response objects.
 
