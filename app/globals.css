@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+/*
+  Design tokens. One restrained palette, one accent, one focus ring.
+  Principles: information at the right time, generous space, no decoration
+  that doesn't carry meaning. Change values here, not in components.
+*/
+@theme {
+  --color-bg: #fbfbfa;
+  --color-surface: #ffffff;
+  --color-line: #e9e8e4;
+  --color-ink: #1a1a18;
+  --color-muted: #6b6a64;
+  --color-faint: #9a988f;
+
+  --color-accent: #1f6feb;
+  --color-accent-ink: #ffffff;
+
+  --color-good: #137a4b;
+  --color-good-bg: #e7f5ed;
+  --color-warn: #9a6700;
+  --color-warn-bg: #fdf6e3;
+  --color-bad: #b42318;
+  --color-bad-bg: #fdeceb;
+
+  --radius: 10px;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ---- demo motion ---- */
+@keyframes fadeup {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.animate-fadeup { animation: fadeup 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+@keyframes pop {
+  0% { opacity: 0; transform: scale(0.96); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.animate-pop { animation: pop 0.3s ease both; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid var(--color-line);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
