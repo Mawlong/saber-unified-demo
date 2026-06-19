@@ -371,7 +371,7 @@ function QuoteResultStep(p: { quote: Quote; clientName: string; txnType: TxnType
         <div className="flex items-center gap-2">{!expired && <button onClick={() => setForced(true)} className="text-[11px] text-[var(--color-faint)] hover:text-[var(--color-muted)] underline">simulate rate move</button>}<StatusPill tone={expired ? "bad" : "warn"}>{expired ? "rate moved · expired" : `locked · ${left}s`}</StatusPill></div>
       </div>
       <div className="flex flex-wrap gap-2"><Chip label="client" value={p.clientName} /><Chip label="is_nri" value={p.isNri ? "true" : "false"} /><Chip label="quote_id" value={p.quote.quote_id} mono /></div>
-      <div className={`grid md:grid-cols-2 gap-4 ${expired ? "opacity-40" : ""}`}>{p.quote.prices.map((pr) => <PriceCard key={pr.partner_type} price={pr} currency={p.currency} />)}</div>
+      <div className={`grid md:grid-cols-2 gap-4 ${expired ? "opacity-40" : ""}`}>{p.quote.prices.map((pr) => <PriceCard key={pr.partner_type} price={pr} currency={p.currency} detailed={false} />)}</div>
       {p.quote.prices.length === 1 && <p className="text-[12px] text-[var(--color-faint)]">One price: this config has a single payout partner (no NRE payout partner set).</p>}
       {expired ? (
         <div className="flex items-center justify-between rounded-[var(--radius)] bg-[var(--color-bad-bg)] px-4 py-3 animate-pop"><span className="text-[13px] text-[var(--color-bad)]">The 30s lock expired. Re-quote to get a fresh price.</span><Button onClick={p.onRequote}>Re-quote</Button></div>
@@ -384,21 +384,21 @@ function QuoteResultStep(p: { quote: Quote; clientName: string; txnType: TxnType
   );
 }
 
-function PriceCard({ price, currency }: { price: Price; currency: string }) {
+function PriceCard({ price, currency, detailed = true }: { price: Price; currency: string; detailed?: boolean }) {
   const isD9 = price.partner_type === "D9";
   const tds = price.tax.tds;
-  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `₹${(tds.amount_inr ?? 0).toLocaleString("en-IN")} absorbed by Saber` : `− ${inr(tds.amount_inr ?? 0)} (1%)`;
+  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `₹${(tds.amount_inr ?? 0).toLocaleString("en-IN")} absorbed by Saber` : `${inr(tds.amount_inr ?? 0)} (1%) · in rate`;
   return (
     <div className={`rounded-[14px] border p-5 animate-pop ${isD9 ? "border-[var(--color-accent)]" : "border-[var(--color-line)]"}`}>
       <div className="flex items-center justify-between"><span className={`inline-flex items-center h-6 px-2.5 rounded-full text-[12px] font-medium ${isD9 ? "bg-[var(--color-accent)] text-[var(--color-accent-ink)]" : "bg-[var(--color-line)] text-[var(--color-muted)]"}`}>{isD9 ? "NRE accounts" : "NRO / savings"}</span></div>
       <div className="mt-3 text-[28px] font-semibold tracking-tight">{inr(price.you_receive)}</div>
-      <div className="text-[12px] text-[var(--color-muted)]">user receives · final_price {price.final_price} INR/{currency}</div>
+      <div className="text-[12px] text-[var(--color-muted)]">user receives · rate {price.final_price} INR/{currency}</div>
       <div className="mt-3 pt-3 border-t border-[var(--color-line)] space-y-1.5">
-        <Line label="base_price" value={`${price.base_price}`} />
-        <Line label="final_price (incl. % fees + TDS)" value={`${price.final_price}`} />
-        <Line label="pre_fee_to_amount" value={inr(price.pre_fee_to_amount)} />
-        <Line label={`Service charge (${price.service_charge.amount.toFixed(2)} ${price.service_charge.currency} · flat)`} value={`− ${inr(price.service_charge.amount * price.final_price)}`} />
-        <Line label="Tax (TDS)" value={tdsValue} tone={tds.applicable && !tds.compensated ? "bad" : "good"} />
+        {detailed && <Line label="base_price" value={`${price.base_price}`} />}
+        {detailed && <Line label="final_price (incl. % fees + TDS)" value={`${price.final_price}`} />}
+        <Line label={detailed ? "pre_fee_to_amount" : "Converted amount"} value={inr(price.pre_fee_to_amount)} />
+        <Line label={`Service charge (${price.service_charge.amount.toFixed(2)} ${price.service_charge.currency})`} value={`− ${inr(price.service_charge.amount * price.final_price)}`} />
+        <Line label="Tax (TDS)" value={tdsValue} tone={tds.compensated ? "good" : undefined} />
       </div>
     </div>
   );
@@ -482,7 +482,7 @@ function Phase({ title, active, children }: { title: string; active: boolean; ch
 function DoneStep({ routing, amount, currency, business, createRequest, onRestart }: { routing: RoutingDecision; amount: number; currency: string; business: boolean; createRequest: unknown; onRestart: () => void }) {
   const c = routing.chosen;
   const tds = c.tax.tds;
-  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `₹${(tds.amount_inr ?? 0).toLocaleString("en-IN")} absorbed by Saber` : `− ${inr(tds.amount_inr ?? 0)}`;
+  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `₹${(tds.amount_inr ?? 0).toLocaleString("en-IN")} absorbed by Saber` : `${inr(tds.amount_inr ?? 0)} · in final_price`;
   return (
     <Card className="p-6 space-y-5 animate-fadeup">
       <div className="flex items-center gap-2.5"><StatusPill tone="good">COMPLETED</StatusPill><span className="text-[13px] text-[var(--color-muted)]">payout settled</span></div>
@@ -490,11 +490,10 @@ function DoneStep({ routing, amount, currency, business, createRequest, onRestar
         <Line label="Sold" value={`${amount} ${currency}`} />
         <Line label="Payout partner" value={`${routing.partner.AggregatorName} (${routing.partner.type === "D9" ? "traditional" : "stables"})`} />
         <Line label="Account type" value={routing.account_type} />
-        <Line label="base_price" value={`${c.base_price} INR/${currency}`} />
-        <Line label="final_price (locked)" value={`${c.final_price} INR/${currency}`} />
-        <Line label="pre_fee_to_amount" value={inr(c.pre_fee_to_amount)} />
-        <Line label={`Service charge (${c.service_charge.amount.toFixed(2)} ${c.service_charge.currency} · flat)`} value={`− ${inr(c.service_charge.amount * c.final_price)}`} />
-        <Line label="TDS" value={tdsValue} tone={tds.applicable && !tds.compensated ? "bad" : "good"} />
+        <Line label="Locked rate" value={`${c.final_price} INR/${currency}`} />
+        <Line label="Converted amount" value={inr(c.pre_fee_to_amount)} />
+        <Line label={`Service charge (${c.service_charge.amount.toFixed(2)} ${c.service_charge.currency})`} value={`− ${inr(c.service_charge.amount * c.final_price)}`} />
+        <Line label="TDS" value={tdsValue} tone={tds.compensated ? "good" : undefined} />
         <div className="pt-2 mt-1 border-t border-[var(--color-line)]"><Line label="Net to beneficiary" value={inr(c.you_receive)} /></div>
       </div>
       <Collapsible title="Checks · everything that ran"><div className="space-y-4"><CheckGroup title="Routing" items={routing.steps} /><CheckGroup title={business ? "KYB / AML" : "KYC / AML"} items={kycChecks(business)} /><CheckGroup title="Lifecycle" items={lifecycleChecks(routing)} /></div></Collapsible>

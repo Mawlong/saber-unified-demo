@@ -1,40 +1,38 @@
-# Business review — 2026-06-18 (dry run, by business-persona)
+# Business review — 2026-06-19T06:09:13Z
 
-Verdict: NEEDS WORK (light) — the flow is solid and the story mostly lands; a few polish items before it faces a CEO.
+Verdict: READY TO SHOW (after fixes) — the must-fix items below were applied and re-verified live; remaining nice-to-haves are optional. One release action outstanding: push so the deployed URL matches local. Coverage this run: full walk — Config, Pricing calculator, Quote, Create, Process, Done.
 
-Walked Config -> Quote -> Result -> Create -> Process -> Done and the Pricing calculator, on the running demo. The QA blocker (quote lock expiring early) was fixed first, so the full flow now completes.
+## Update — applied this run
+- Negative "user receives" on small/zero amounts: FIXED (floored at ₹0).
+- TDS double-presentation on the price card: FIXED (shown as "in rate", not a second deduction; lines reconcile).
+- Engineering field names trimmed off the business-facing Quote card and Done summary (kept in the calculator and Engineering view).
+- Outstanding: `git push` so GitHub Pages serves the updated demo (currently the original is deployed).
 
 ## Persona reactions
 
 ### Head of Business (the buyer)
-- Worked: the two prices are labelled by what I understand ("NRE accounts" vs "NRO / savings"), not by internal partner names. Each price card leads with the big "user receives" number and shows gross, the $0.30 platform fee, and tax with nothing hidden. The 30s locked-rate countdown reads as trustworthy. The Done screen shows the full breakdown to my beneficiary.
-- Confused / trust: the Config screen is Saber's internal pricing setup (spread, min/max band, source price, traditional rail, GST). As a client I do not set these, so seeing them first made me wonder whose view this is. Internal partner names (RPFS, D9) leak on the routing and Done screens; the price cards handle this better by hiding them.
-- Jargon a client would not know without help: RPFS, D9, "traditional rail", is_nri, party_scope, pool_sell, purpose code IR001.
+- Worked: the quote card leads with one big number ("user receives ₹8,850") and the rate is labelled `final_price` with "incl. % fees + TDS". The separate "Service charge (0.30 USDT · flat)" line is exactly the transparency a buyer wants — they can see the fee apart from FX.
+- Confused: on a resident card the line items don't add up. It shows `pre_fee_to_amount ₹8,581`, `Service charge − ₹26`, and `Tax (TDS) − ₹87`, but the headline is ₹8,555. A buyer doing the mental math (8,581 − 26 − 87) gets ₹8,468 and asks "where did ₹87 go?" The TDS is already inside `final_price`, but the card presents it as a second deduction.
+- Broke trust: entering a small/zero amount shows "user receives ₹-27". A negative payout on screen instantly undermines confidence in the pricing engine.
 
-### Skeptical CEO (2 minutes)
-- The stage tracker (Config -> Quote -> Result -> Create -> Process -> Done) is a clean story spine, and the hero numbers (₹8,850 net) are obvious.
-- But the demo opens on a wall of pricing inputs. A cold viewer's first screen should be the outcome or a one-line orientation, not Saber's internal knobs. I want the "so what" in five seconds.
-- Good: "internal - not production" is set; the engineering JSON is tucked away and never required to follow the screen.
-- "Payout partner D9 (D9)" on the Done screen looks like a bug to me (the label repeats).
+### Skeptical CEO (2-minute attention)
+- The one number that matters (what the user receives) is prominent and the fee is a clean single line — good. The story "flat fee, on top, in USDT, separate from FX and tax" is repeatable.
+- Field labels like `pre_fee_to_amount` and `base_price` on the card are engineering terms bleeding into the business view. A CEO doesn't need both `base_price` and `final_price` plus `pre_fee_to_amount` on the card; it reads like a debug panel.
+- The negative-amount result is the kind of thing that derails a live demo.
 
 ### Finance / ops
-- Strong: TDS is transparent everywhere. The Processing -> Routing steps spell out "Settles offshore - no TDS" vs the resident-on-stables 1% case, and compensate_tds shows "absorbed by Saber". That is defensible.
-- The Pricing calculator (source -> spread -> clamp -> gross -> fee -> TDS -> net) is exactly what I need to validate the math.
-- Open question: GST (tax_on_fee) appears in the config but never in the price breakdown. I would want to see where it lands, even if it is zero.
+- TDS handling is defensible and the "How it's calculated" step view is excellent — it shows base → % fees → TDS → final_price → service charge → net transparently, which is exactly what finance wants.
+- But the summary card double-presents TDS (folded into the rate AND shown as a line), which a finance reviewer will flag as a reconciliation error.
 
 ## Changes to make (prioritised, product/UX not bugs)
-
-| # | Priority | Screen | Change | Why it matters |
+| # | Priority | Screen | Change | Why it matters to the audience |
 |---|---|---|---|---|
-| 1 | should-fix | Done, Routing | "Payout partner D9 (D9)" repeats the name. Show the partner once, with a plain rail descriptor (e.g. "D9 (traditional)", "Transxt (stables)"). | Looks like a glitch to a CEO. |
-| 2 | should-fix | Config | Frame this as Saber's internal setup view, not what the client sees (a short subtitle or an "internal view" tag). | Removes the "whose screen is this" confusion for a buyer/CEO. |
-| 3 | nice-to-have | Top of flow | Add a one-line orientation ("how a client is configured, quoted, and paid out") so a cold opener gets the arc instantly. | Helps the 2-minute CEO. |
-| 4 | nice-to-have | Any client-facing screen | Keep the price-card discipline of labelling by account type, not partner name; avoid leaking RPFS/D9 where the framing is client-facing. | Reduces jargon for outside audiences. |
-| 5 | nice-to-have | Price breakdown | Surface GST on the fee (or note it is zero) so finance is not left wondering. | Closes a finance question. |
+| 1 | must-fix | Price cards | Never show a negative "user receives"; floor at ₹0 or show "amount below minimum fee". | A negative payout breaks trust instantly and can derail the CEO demo. |
+| 2 | must-fix | Price cards | Stop showing TDS as a second red deduction when it's already in `final_price`; label it "included in rate" (or remove). | The line items must reconcile to the headline or buyers/finance lose confidence. |
+| 3 | should-fix | Price cards | Trim engineering field names on the business-facing card (`base_price`, `pre_fee_to_amount`); keep the rate, the service charge, and the net. Leave the raw fields to the Engineering view. | Reduces "debug panel" feel for a CEO; keeps the one number obvious. |
+| 4 | nice-to-have | Calculator/Quote | Show the service charge's INR impact next to the USDT amount (e.g. "0.30 USDT ≈ ₹26") so a non-crypto buyer feels the size. | Helps a fiat-thinking buyer gauge the fee. |
 
 ## Top 3 to fix before showing
-1. The "D9 (D9)" label redundancy (item 1).
-2. Frame the Config screen as the internal setup view (item 2).
-3. A one-line orientation at the top for a cold opener (item 3).
-
-No must-fix blockers from the business lens (the one blocker, the quote-lock timer, was a QA item and is fixed). These are polish to make it client- and CEO-ready.
+1. Kill the negative "user receives" on small/zero amounts.
+2. Fix the TDS double-presentation on the price card so the numbers reconcile.
+3. Push to the deployed URL (currently the original demo is live) so reviewers see the updated pricing.

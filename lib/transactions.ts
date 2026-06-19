@@ -245,7 +245,7 @@ export function priceFor(cfg: ClientConfig, rail: PartnerType, amount: number, i
     tax: isRpfs
       ? { tds: { applicable: tdsApplicable, rate: pc.tds, depends_on: "is_nri", amount_inr: tdsRaw, compensated } }
       : { tds: { applicable: false } },
-    you_receive: r0((amount - svcAmt) * finalRate), // service charge deducted in crypto, then converted
+    you_receive: r0(Math.max(0, (amount - svcAmt) * finalRate)), // floor at 0; service charge deducted in crypto, then converted
   };
 }
 
