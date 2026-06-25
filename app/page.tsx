@@ -15,7 +15,6 @@ import {
   partyTypes,
   SENDER_ADDRESS,
   RECEIVER_ADDRESS,
-  PLATFORM_FEE_USD,
   type ClientConfig,
   type Quote,
   type Price,
@@ -25,19 +24,21 @@ import {
   type PartnerType,
   type SellCurrency,
   type TxnType,
-  type PartyScope,
+  type AmountBasis,
   type CreateInput,
 } from "@/lib/transactions";
 
 /*
-  Unified transaction demo. ONE editable config drives everything (no assumptions):
+  Unified transaction demo. ONE editable config drives everything:
   edit it in the flow's Config step or in the Calculator tab, and the prices, quote, and
   create-transaction all follow. Stages: Config -> Quote -> Result -> Create -> Process -> Done.
+  Off-ramp (sell) only. Amount can be fixed by from_amount (crypto) or to_amount (INR).
 */
 
 const inr = (n: number) => "₹" + Math.round(n).toLocaleString("en-IN");
 const pct = (f: number) => `${(f * 100).toFixed(2)}%`;
 const num = (s: string) => { const n = parseFloat(s); return isNaN(n) ? 0 : n; };
+const cx = (n: number, ccy: string) => `${n} ${ccy}`;
 
 const STAGES = [
   { label: "Config", step: 0 }, { label: "Quote", step: 1 }, { label: "Result", step: 3 },
@@ -50,6 +51,7 @@ type CfgForm = {
   label: string; kind: string; ccy: SellCurrency;
   srcStables: string; srcD9: string;
   spread: string; priceLock: string; tds: string; taxOnFee: string; platFee: string;
+  platformPct: string; clientFeePct: string; discountPct: string;
   minP: string; maxP: string; compensate: boolean;
   payoutAgg: string; payoutMethod: string; payoutAcct: string;
   nreOn: boolean; nreAgg: string; nreAcct: string;
@@ -63,6 +65,7 @@ function cfgToForm(c: ClientConfig): CfgForm {
     srcStables: String(c._source.stables), srcD9: String(c._source.d9 || 88.5),
     spread: String(p.client_spread * 100), priceLock: String(p.price_lock_spread * 100),
     tds: String(p.tds * 100), taxOnFee: String(p.tax_on_fee * 100), platFee: String(p.platform_fee_usd),
+    platformPct: String(p.platform_fee * 100), clientFeePct: String(p.client_fee * 100), discountPct: String(p.discount * 100),
     minP: String(p.min_price), maxP: String(p.max_price), compensate: !!p.compensate_tds,
     payoutAgg: c.partner_config.payout_partner.AggregatorName, payoutMethod: c.partner_config.payout_partner.PaymentMethodName,
     payoutAcct: c.partner_config.payout_partner.AccountNumber || "",
@@ -82,7 +85,7 @@ function formToCfg(f: CfgForm): ClientConfig {
       ...(f.nreOn ? { nre_payout_partner: { type: "D9" as PartnerType, AggregatorName: f.nreAgg || "D9", PaymentMethodName: "bank_transfer", AccountNumber: f.nreAcct || undefined } } : {}),
     },
     pricing_config: {
-      platform_fee_usd: num(f.platFee), platform_fee: 0, tax_on_fee: frac(f.taxOnFee), discount: 0, client_fee: 0,
+      platform_fee_usd: num(f.platFee), platform_fee: frac(f.platformPct), tax_on_fee: frac(f.taxOnFee), discount: frac(f.discountPct), client_fee: frac(f.clientFeePct),
       client_spread: frac(f.spread), price_lock_spread: frac(f.priceLock), tds: frac(f.tds), compensate_tds: f.compensate,
       min_price: num(f.minP), max_price: num(f.maxP), price_stream: pinned ? undefined : "Xe",
       ...(f.nreOn ? { traditional_rail: { client_spread: frac(f.tradSpread), price_stream: "Xe", min_price: num(f.tradMin), max_price: num(f.tradMax) } } : {}),
@@ -100,14 +103,16 @@ export default function Page() {
   const set = <K extends keyof CfgForm>(k: K, v: CfgForm[K]) => setForm((f) => ({ ...f, [k]: v }));
   const cfg = formToCfg(form);
 
-  // quote inputs
-  const [amount, setAmount] = useState("100");
+  // quote inputs (off-ramp / sell only)
+  const [basis, setBasis] = useState<AmountBasis>("from_amount");
+  const [fromAmt, setFromAmt] = useState("100"); // crypto
+  const [toAmt, setToAmt] = useState("8500"); // INR
+  const amountValue = basis === "from_amount" ? num(fromAmt) : num(toAmt);
   const [txnType, setTxnType] = useState<TxnType>("C2C");
   const [isNri, setIsNri] = useState(true);
   const [quote, setQuote] = useState<Quote | null>(null);
 
   // create inputs
-  const [partyScope, setPartyScope] = useState<PartyScope>("FIRST_PARTY");
   const [purpose, setPurpose] = useState("IR001");
   const [sourceIncome, setSourceIncome] = useState("SALARY");
   const [sFirst, setSFirst] = useState("Jane");
@@ -124,18 +129,23 @@ export default function Page() {
   const [ifsc, setIfsc] = useState("HDFC0001234");
 
   const pt = partyTypes(txnType);
-  const firstParty = partyScope === "FIRST_PARTY" && !pt.senderBusiness && !pt.receiverBusiness;
+  // party scope is derived from is_nri: NRI => first party, resident => third party.
+  const firstParty = isNri;
+  const mirror = firstParty && !pt.senderBusiness && !pt.receiverBusiness; // receiver = sender (individual self)
 
   const createInput: CreateInput = {
     client_id: "_active", quote_id: quote?.quote_id ?? "", transaction_type: txnType,
     party_scope: firstParty ? "FIRST_PARTY" : "THIRD_PARTY", purpose_code: purpose, source_of_income: sourceIncome, message: "June support",
     sender: { is_business: pt.senderBusiness, legal_name: bizName, registration_number: bizReg, first_name: sFirst, last_name: sLast, date_of_birth: sDob, nationality: sNat, is_nri: isNri, id_type: "PASSPORT", id_number: "P1234567", email: "jane@example.com", mobile: "+919876543210", address: SENDER_ADDRESS },
-    receiver: { is_business: pt.receiverBusiness, legal_name: rcvBiz, first_name: firstParty ? sFirst : rFirst, last_name: firstParty ? sLast : rLast, relationship: firstParty ? "SELF" : pt.receiverBusiness ? "SUPPLIER" : "PARENT", address: firstParty ? SENDER_ADDRESS : RECEIVER_ADDRESS, account_number: accountNo, ifsc, account_type: accountType },
+    receiver: { is_business: pt.receiverBusiness, legal_name: rcvBiz, first_name: mirror ? sFirst : rFirst, last_name: mirror ? sLast : rLast, relationship: mirror ? "SELF" : pt.receiverBusiness ? "SUPPLIER" : "PARENT", address: mirror ? SENDER_ADDRESS : RECEIVER_ADDRESS, account_number: accountNo, ifsc, account_type: accountType },
   };
 
-  const routing = quote ? resolveRouting(cfg, accountType, Number(amount), isNri) : null;
+  const routing = quote ? resolveRouting(cfg, accountType, quote) : null;
   const createRequest = buildCreateRequest(createInput);
 
+  function makeQuote() {
+    setQuote(buildQuoteFor(cfg, { amount_basis: basis, amount_value: amountValue, transaction_type: txnType, is_nri: isNri }));
+  }
   function restart() { setStep(0); setQuote(null); setView("flow"); }
   function goStage(s: number) { setView("flow"); setStep(s); }
 
@@ -143,30 +153,29 @@ export default function Page() {
     <div>
       <TopBar view={view} setView={setView} step={step} goStage={goStage} />
 
-      {view === "calc" && (
-        <CalcView form={form} set={set} cfg={cfg} onBack={() => setView("flow")} />
-      )}
+      {view === "calc" && <CalcView form={form} set={set} cfg={cfg} onBack={() => setView("flow")} />}
 
       {view === "flow" && (
         <>
           {step === 0 && <ConfigStep form={form} set={set} cfg={cfg} onLoad={(id) => setForm(cfgToForm(getClient(id)))} onNext={() => setStep(1)} />}
 
           {step === 1 && (
-            <QuoteInputStep client={cfg.label} currency={cfg.from_currency} amount={amount} setAmount={setAmount}
+            <QuoteInputStep client={cfg.label} currency={cfg.from_currency}
+              basis={basis} setBasis={setBasis} fromAmt={fromAmt} setFromAmt={setFromAmt} toAmt={toAmt} setToAmt={setToAmt}
               txnType={txnType} setTxnType={setTxnType} isNri={isNri} setIsNri={setIsNri}
-              onBack={() => setStep(0)} onNext={() => { setQuote(buildQuoteFor(cfg, { from_amount: Number(amount), transaction_type: txnType, is_nri: isNri })); setStep(2); }} />
+              onBack={() => setStep(0)} onNext={() => { makeQuote(); setStep(2); }} />
           )}
 
           {step === 2 && <QuoteLoadingStep client={cfg.label} onDone={() => setStep(3)} />}
 
           {step === 3 && quote && (
             <QuoteResultStep key={quote.quote_id} quote={quote} clientName={cfg.label} txnType={txnType} isNri={isNri} currency={cfg.from_currency}
-              onBack={() => setStep(1)} onRequote={() => setQuote(buildQuoteFor(cfg, { from_amount: Number(amount), transaction_type: txnType, is_nri: isNri }))} onNext={() => setStep(4)} />
+              onBack={() => setStep(1)} onRequote={makeQuote} onNext={() => setStep(4)} />
           )}
 
           {step === 4 && quote && (
-            <CreateInputStep quoteId={quote.quote_id} txnType={txnType} partyScope={partyScope} setPartyScope={setPartyScope}
-              senderBusiness={pt.senderBusiness} receiverBusiness={pt.receiverBusiness} firstParty={firstParty}
+            <CreateInputStep quoteId={quote.quote_id} txnType={txnType} isNri={isNri}
+              senderBusiness={pt.senderBusiness} receiverBusiness={pt.receiverBusiness} firstParty={firstParty} mirror={mirror}
               purpose={purpose} setPurpose={setPurpose} sourceIncome={sourceIncome} setSourceIncome={setSourceIncome}
               sFirst={sFirst} setSFirst={setSFirst} sLast={sLast} setSLast={setSLast} sDob={sDob} setSDob={setSDob} sNat={sNat} setSNat={setSNat}
               rFirst={rFirst} setRFirst={setRFirst} rLast={rLast} setRLast={setRLast}
@@ -180,7 +189,7 @@ export default function Page() {
           )}
 
           {step === 6 && routing && (
-            <DoneStep routing={routing} amount={Number(amount)} currency={cfg.from_currency} business={pt.senderBusiness || pt.receiverBusiness} createRequest={createRequest} onRestart={restart} />
+            <DoneStep routing={routing} currency={cfg.from_currency} business={pt.senderBusiness || pt.receiverBusiness} createRequest={createRequest} onRestart={restart} />
           )}
         </>
       )}
@@ -225,23 +234,26 @@ function PricingEditor({ form: f, set }: { form: CfgForm; set: <K extends keyof 
   const pinned = num(f.minP) === num(f.maxP) && num(f.minP) !== 0;
   return (
     <div className="space-y-4">
-      <div className="grid sm:grid-cols-3 gap-3">
+      <div className="grid sm:grid-cols-2 gap-3">
         <Select label="Sell currency" value={f.ccy} onChange={(v) => set("ccy", v as SellCurrency)} options={[{ value: "USDC", label: "USDC" }, { value: "USDT", label: "USDT" }]} />
         <Field label="Source price (live)" value={f.srcStables} onChange={(e) => set("srcStables", e.target.value)} hint={pinned ? "ignored — min = max (static)" : "from the price stream"} />
         <Field label="Client spread %" value={f.spread} onChange={(e) => set("spread", e.target.value)} hint="negative = better rate" />
+        <Field label="Price-lock spread %" value={f.priceLock} onChange={(e) => set("priceLock", e.target.value)} hint="extra spread, applied only when output (INR) is fixed" />
         <Field label="Min price" value={f.minP} onChange={(e) => set("minP", e.target.value)} />
         <Field label="Max price" value={f.maxP} onChange={(e) => set("maxP", e.target.value)} hint="set min = max to pin a static price" />
-        <Field label="Service charge (USD)" value={f.platFee} onChange={(e) => set("platFee", e.target.value)} />
-        <Field label="Price-lock spread %" value={f.priceLock} onChange={(e) => set("priceLock", e.target.value)} />
-        <Field label="TDS %" value={f.tds} onChange={(e) => set("tds", e.target.value)} />
+        <Field label={`Service charge (flat, ${f.ccy})`} value={f.platFee} onChange={(e) => set("platFee", e.target.value)} hint="flat per-txn fee in crypto; changes the net, not the rate" />
+        <Field label="Platform fee %" value={f.platformPct} onChange={(e) => set("platformPct", e.target.value)} hint="% of converted INR; GST applies to this" />
+        <Field label="GST on platform fee %" value={f.taxOnFee} onChange={(e) => set("taxOnFee", e.target.value)} hint="only bites if platform fee % > 0" />
+        <Field label="Client fee %" value={f.clientFeePct} onChange={(e) => set("clientFeePct", e.target.value)} hint="% of converted INR" />
+        <Field label="Discount %" value={f.discountPct} onChange={(e) => set("discountPct", e.target.value)} hint="% of INR added back to the net" />
+        <Field label="TDS %" value={f.tds} onChange={(e) => set("tds", e.target.value)} hint="on converted INR; RPFS + resident only" />
         <Select label="compensate_tds" value={f.compensate ? "yes" : "no"} onChange={(v) => set("compensate", v === "yes")} options={[{ value: "no", label: "No" }, { value: "yes", label: "Yes — Saber absorbs TDS" }]} />
-        <Field label="GST on fee %" value={f.taxOnFee} onChange={(e) => set("taxOnFee", e.target.value)} />
       </div>
       <div>
         <Select label="NRE payout partner / traditional rail" value={f.nreOn ? "on" : "off"} onChange={(v) => set("nreOn", v === "on")}
           options={[{ value: "off", label: "Not set (one price)" }, { value: "on", label: "Set — adds the D9 traditional price" }]} />
         {f.nreOn && (
-          <div className="grid sm:grid-cols-4 gap-3 mt-3">
+          <div className="grid sm:grid-cols-2 gap-3 mt-3">
             <Field label="D9 source price" value={f.srcD9} onChange={(e) => set("srcD9", e.target.value)} />
             <Field label="D9 spread %" value={f.tradSpread} onChange={(e) => set("tradSpread", e.target.value)} />
             <Field label="D9 min" value={f.tradMin} onChange={(e) => set("tradMin", e.target.value)} />
@@ -254,69 +266,107 @@ function PricingEditor({ form: f, set }: { form: CfgForm; set: <K extends keyof 
 }
 function PartnerEditor({ form: f, set }: { form: CfgForm; set: <K extends keyof CfgForm>(k: K, v: CfgForm[K]) => void }) {
   return (
-    <div className="grid sm:grid-cols-3 gap-3">
-      <Field label="Payout partner" value={f.payoutAgg} onChange={(e) => set("payoutAgg", e.target.value)} />
-      <Field label="Payment method" value={f.payoutMethod} onChange={(e) => set("payoutMethod", e.target.value)} />
-      <Field label="Account number" value={f.payoutAcct} onChange={(e) => set("payoutAcct", e.target.value)} />
-      {f.nreOn && <Field label="NRE payout partner" value={f.nreAgg} onChange={(e) => set("nreAgg", e.target.value)} />}
-      {f.nreOn && <Field label="NRE account" value={f.nreAcct} onChange={(e) => set("nreAcct", e.target.value)} />}
+    <div className="space-y-3">
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="Payout partner" value={f.payoutAgg} onChange={(e) => set("payoutAgg", e.target.value)} />
+        <Field label="Payment method" value={f.payoutMethod} onChange={(e) => set("payoutMethod", e.target.value)} />
+        <Field label="Account number" value={f.payoutAcct} onChange={(e) => set("payoutAcct", e.target.value)} />
+      </div>
+      {f.nreOn && (
+        <div className="grid sm:grid-cols-2 gap-3">
+          <Field label="NRE payout partner" value={f.nreAgg} onChange={(e) => set("nreAgg", e.target.value)} />
+          <Field label="NRE account" value={f.nreAcct} onChange={(e) => set("nreAcct", e.target.value)} />
+        </div>
+      )}
+      <p className="text-[12px] text-[var(--color-faint)]">An NRE account uses the NRE payout partner if one is set; every other account uses the payout partner.</p>
     </div>
   );
 }
-function PricePreview({ cfg, amount, isNri }: { cfg: ClientConfig; amount: number; isNri: boolean }) {
+
+/* Reusable live quote preview (right column of Config + Calculator). */
+function QuotePreview({ cfg, showCalc }: { cfg: ClientConfig; showCalc?: boolean }) {
+  const ccy = cfg.from_currency;
+  const [basis, setBasis] = useState<AmountBasis>("from_amount");
+  const [fromAmt, setFromAmt] = useState("100");
+  const [toAmt, setToAmt] = useState("8500");
+  const [isNri, setIsNri] = useState(false);
+  const value = basis === "from_amount" ? num(fromAmt) : num(toAmt);
   const rails: PartnerType[] = [cfg.partner_config.payout_partner.type, ...(cfg.partner_config.nre_payout_partner ? [cfg.partner_config.nre_payout_partner.type] : [])];
-  return <div className="grid md:grid-cols-2 gap-4">{rails.map((r) => <PriceCard key={r} price={priceFor(cfg, r, amount, isNri)} currency={cfg.from_currency} />)}</div>;
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <Select label="Amount basis" value={basis} onChange={(v) => setBasis(v as AmountBasis)}
+          options={[{ value: "from_amount", label: `from_amount (${ccy})` }, { value: "to_amount", label: "to_amount (INR)" }]} />
+        {basis === "from_amount"
+          ? <Field label={`Sell (${ccy})`} inputMode="decimal" value={fromAmt} onChange={(e) => setFromAmt(e.target.value.replace(/[^0-9.]/g, ""))} />
+          : <Field label="Convert (INR)" inputMode="numeric" value={toAmt} onChange={(e) => setToAmt(e.target.value.replace(/[^0-9]/g, ""))} />}
+      </div>
+      <Select label="Recipient NRI (is_nri)" value={isNri ? "yes" : "no"} onChange={(v) => setIsNri(v === "yes")} options={[{ value: "no", label: "Resident (TDS on stables)" }, { value: "yes", label: "NRI (no TDS)" }]} />
+      <div className="space-y-3">{rails.map((r) => <PriceCard key={r} price={priceFor(cfg, r, basis, value, isNri)} currency={ccy} />)}</div>
+      {rails.length === 1 && <p className="text-[12px] text-[var(--color-faint)]">One price: no NRE payout partner is set.</p>}
+      {showCalc && <Collapsible title="Show the calculation"><CalcBreakdown cfg={cfg} basis={basis} value={value} isNri={isNri} /></Collapsible>}
+    </div>
+  );
 }
 
-/* ---------------- 0. config (editable) ---------------- */
+/* ---------------- 0. config (two columns) ---------------- */
 function ConfigStep({ form, set, cfg, onLoad, onNext }: { form: CfgForm; set: <K extends keyof CfgForm>(k: K, v: CfgForm[K]) => void; cfg: ClientConfig; onLoad: (id: string) => void; onNext: () => void }) {
   return (
     <Card className="p-6 space-y-6 animate-fadeup">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-[20px] font-semibold tracking-tight">Client configuration</h1>
-          <p className="text-[13px] text-[var(--color-muted)] mt-0.5">Edit anything. The quote, prices, and create-transaction all follow this config.</p>
+          <p className="text-[13px] text-[var(--color-muted)] mt-0.5">Edit the config on the left; the quote on the right updates live.</p>
         </div>
         <div className="w-56">
           <Select label="Load a template" value="" onChange={(v) => v && onLoad(v)} options={[{ value: "", label: "Start from…" }, ...clients.map((c) => ({ value: c.id, label: `${c.label} — ${c.kind}` }))]} />
         </div>
       </div>
 
-      <ConfigBlock title="Partner config — system-driven routing">
-        <PartnerEditor form={form} set={set} />
-        <p className="text-[12px] text-[var(--color-faint)] mt-2">An NRE account uses the NRE payout partner if one is set; every other account uses the payout partner.</p>
-      </ConfigBlock>
-
-      <ConfigBlock title="Pricing config — adjust and watch the prices change">
-        <PricingEditor form={form} set={set} />
-      </ConfigBlock>
-
-      <ConfigBlock title="Resulting prices (100 units, resident)">
-        <PricePreview cfg={cfg} amount={100} isNri={false} />
-        <Collapsible title="Show the calculation"><CalcBreakdown cfg={cfg} amount={100} isNri={false} /></Collapsible>
-      </ConfigBlock>
+      <div className="grid lg:grid-cols-2 gap-6">
+        {/* LEFT — configuration */}
+        <div className="space-y-3">
+          <ColTitle>Configuration</ColTitle>
+          <Collapsible title="Pricing configuration" defaultOpen><PricingEditor form={form} set={set} /></Collapsible>
+          <Collapsible title="Partner mapping configuration"><PartnerEditor form={form} set={set} /></Collapsible>
+        </div>
+        {/* RIGHT — live quote */}
+        <div className="space-y-3">
+          <ColTitle>Quote</ColTitle>
+          <QuotePreview cfg={cfg} showCalc />
+        </div>
+      </div>
 
       <div className="flex justify-end"><Button onClick={onNext}>Use this config →</Button></div>
       <EngineeringPanel blocks={[{ label: "partner_config", data: cfg.partner_config }, { label: "pricing_config", data: cfg.pricing_config }]} />
     </Card>
   );
 }
-function ConfigBlock({ title, children }: { title: string; children: React.ReactNode }) {
-  return <div><div className="text-[12px] font-semibold text-[var(--color-muted)] border-b border-[var(--color-line)] pb-1.5 mb-3">{title}</div>{children}</div>;
+function ColTitle({ children }: { children: React.ReactNode }) {
+  return <div className="text-[13px] font-semibold text-[var(--color-ink)]">{children}</div>;
 }
 
 /* ---------------- 1. quote input ---------------- */
-function QuoteInputStep(p: { client: string; currency: string; amount: string; setAmount: (v: string) => void; txnType: TxnType; setTxnType: (v: TxnType) => void; isNri: boolean; setIsNri: (v: boolean) => void; onBack: () => void; onNext: () => void }) {
+function QuoteInputStep(p: {
+  client: string; currency: SellCurrency;
+  basis: AmountBasis; setBasis: (v: AmountBasis) => void;
+  fromAmt: string; setFromAmt: (v: string) => void; toAmt: string; setToAmt: (v: string) => void;
+  txnType: TxnType; setTxnType: (v: TxnType) => void; isNri: boolean; setIsNri: (v: boolean) => void; onBack: () => void; onNext: () => void;
+}) {
   return (
     <Card className="p-6 space-y-5 animate-fadeup">
       <div>
         <h1 className="text-[20px] font-semibold tracking-tight">Get a quote</h1>
-        <p className="text-[13px] text-[var(--color-muted)] mt-0.5">{p.client} · {p.currency} → INR. Defaults are filled; change anything or just continue.</p>
+        <p className="text-[13px] text-[var(--color-muted)] mt-0.5">{p.client} · {p.currency} → INR (sell). Fix either the crypto in or the INR out.</p>
       </div>
       <div className="grid sm:grid-cols-2 gap-4">
-        <Field label={`Sell (${p.currency})`} inputMode="numeric" value={p.amount} onChange={(e) => p.setAmount(e.target.value.replace(/[^0-9]/g, ""))} />
+        <Select label="Amount basis" value={p.basis} onChange={(v) => p.setBasis(v as AmountBasis)}
+          options={[{ value: "from_amount", label: `from_amount — fix crypto sold (${p.currency})` }, { value: "to_amount", label: "to_amount — fix INR converted" }]} />
+        {p.basis === "from_amount"
+          ? <Field label={`Sell (${p.currency})`} inputMode="decimal" value={p.fromAmt} onChange={(e) => p.setFromAmt(e.target.value.replace(/[^0-9.]/g, ""))} hint="service charge is deducted from this first" />
+          : <Field label="Convert (INR)" inputMode="numeric" value={p.toAmt} onChange={(e) => p.setToAmt(e.target.value.replace(/[^0-9]/g, ""))} hint="service charge is added on top, in crypto" />}
         <Select label="Transaction type" value={p.txnType} onChange={(v) => p.setTxnType(v as TxnType)} options={[{ value: "C2C", label: "C2C — consumer to consumer" }, { value: "C2B", label: "C2B" }, { value: "B2C", label: "B2C" }, { value: "B2B", label: "B2B" }]} />
-        <Select label="Recipient is NRI (is_nri)" value={p.isNri ? "yes" : "no"} onChange={(v) => p.setIsNri(v === "yes")} options={[{ value: "yes", label: "Yes — not an India tax resident (no TDS)" }, { value: "no", label: "No — resident (TDS on stables)" }]} hint="Optional at quote, required for the INR leg at create" />
+        <Select label="Recipient is NRI (is_nri)" value={p.isNri ? "yes" : "no"} onChange={(v) => p.setIsNri(v === "yes")} options={[{ value: "yes", label: "Yes — NRI, first party (no TDS)" }, { value: "no", label: "No — resident, third party (TDS on stables)" }]} hint="Also decides first vs third party at create" />
       </div>
       <div className="flex justify-between"><Button variant="ghost" onClick={p.onBack}>← Back</Button><Button onClick={p.onNext}>Fetch quote →</Button></div>
     </Card>
@@ -341,7 +391,7 @@ function lifecycleChecks(routing: RoutingDecision) {
   return [
     { label: "Transaction CREATED", detail: "order placed against the locked quote" },
     { label: "PROCESSING", detail: `payout via ${routing.partner.AggregatorName}` },
-    { label: "COMPLETED", detail: `₹${routing.chosen.you_receive.toLocaleString("en-IN")} settled to the beneficiary` },
+    { label: "COMPLETED", detail: `₹${routing.chosen.to_amount.toLocaleString("en-IN")} settled to the beneficiary` },
   ];
 }
 
@@ -351,9 +401,7 @@ function QuoteLoadingStep({ client, onDone }: { client: string; onDone: () => vo
 }
 
 /* ---------------- 3. quote result ---------------- */
-function QuoteResultStep(p: { quote: Quote; clientName: string; txnType: TxnType; isNri: boolean; currency: string; onBack: () => void; onRequote: () => void; onNext: () => void }) {
-  // derive the countdown from the quote's expiry timestamp, so it is accurate to wall-clock
-  // regardless of how many intervals fire (StrictMode-safe). `forced` handles "simulate rate move".
+function QuoteResultStep(p: { quote: Quote; clientName: string; txnType: TxnType; isNri: boolean; currency: SellCurrency; onBack: () => void; onRequote: () => void; onNext: () => void }) {
   const expiresAt = new Date(p.quote.expires_at).getTime();
   const remaining = () => Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
   const [left, setLeft] = useState(remaining);
@@ -364,14 +412,21 @@ function QuoteResultStep(p: { quote: Quote; clientName: string; txnType: TxnType
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expiresAt]);
   const expired = forced || left <= 0;
+  const basisLabel = p.quote.amount_basis === "from_amount"
+    ? `from_amount · ${p.quote.from_amount} ${p.currency}`
+    : `to_amount · ${inr(p.quote.to_amount ?? 0)}`;
   return (
     <Card className="p-6 space-y-5 animate-fadeup">
       <div className="flex items-start justify-between">
-        <div><h1 className="text-[20px] font-semibold tracking-tight">Quote</h1><p className="text-[13px] text-[var(--color-muted)] mt-0.5">{p.quote.from_amount} {p.currency} → INR · {p.txnType}</p></div>
+        <div><h1 className="text-[20px] font-semibold tracking-tight">Quote</h1><p className="text-[13px] text-[var(--color-muted)] mt-0.5">{p.clientName} · {p.currency} → INR · {p.txnType}</p></div>
         <div className="flex items-center gap-2">{!expired && <button onClick={() => setForced(true)} className="text-[11px] text-[var(--color-faint)] hover:text-[var(--color-muted)] underline">simulate rate move</button>}<StatusPill tone={expired ? "bad" : "warn"}>{expired ? "rate moved · expired" : `locked · ${left}s`}</StatusPill></div>
       </div>
-      <div className="flex flex-wrap gap-2"><Chip label="client" value={p.clientName} /><Chip label="is_nri" value={p.isNri ? "true" : "false"} /><Chip label="quote_id" value={p.quote.quote_id} mono /></div>
-      <div className={`grid md:grid-cols-2 gap-4 ${expired ? "opacity-40" : ""}`}>{p.quote.prices.map((pr) => <PriceCard key={pr.partner_type} price={pr} currency={p.currency} detailed={false} />)}</div>
+      <div className="flex flex-wrap gap-2">
+        <Chip label="basis" value={basisLabel} />
+        <Chip label="is_nri" value={p.isNri ? "true" : "false"} />
+        <Chip label="quote_id" value={p.quote.quote_id} mono />
+      </div>
+      <div className={`grid md:grid-cols-2 gap-4 ${expired ? "opacity-40" : ""}`}>{p.quote.prices.map((pr) => <PriceCard key={pr.partner_type} price={pr} currency={p.currency} />)}</div>
       {p.quote.prices.length === 1 && <p className="text-[12px] text-[var(--color-faint)]">One price: this config has a single payout partner (no NRE payout partner set).</p>}
       {expired ? (
         <div className="flex items-center justify-between rounded-[var(--radius)] bg-[var(--color-bad-bg)] px-4 py-3 animate-pop"><span className="text-[13px] text-[var(--color-bad)]">The 30s lock expired. Re-quote to get a fresh price.</span><Button onClick={p.onRequote}>Re-quote</Button></div>
@@ -384,21 +439,25 @@ function QuoteResultStep(p: { quote: Quote; clientName: string; txnType: TxnType
   );
 }
 
-function PriceCard({ price, currency, detailed = true }: { price: Price; currency: string; detailed?: boolean }) {
+function PriceCard({ price, currency }: { price: Price; currency: string }) {
   const isD9 = price.partner_type === "D9";
   const tds = price.tax.tds;
-  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `₹${(tds.amount_inr ?? 0).toLocaleString("en-IN")} absorbed by Saber` : `${inr(tds.amount_inr ?? 0)} (1%) · in rate`;
+  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `${inr(tds.amount_inr ?? 0)} absorbed by Saber` : `− ${inr(tds.amount_inr ?? 0)} (1%)`;
   return (
     <div className={`rounded-[14px] border p-5 animate-pop ${isD9 ? "border-[var(--color-accent)]" : "border-[var(--color-line)]"}`}>
-      <div className="flex items-center justify-between"><span className={`inline-flex items-center h-6 px-2.5 rounded-full text-[12px] font-medium ${isD9 ? "bg-[var(--color-accent)] text-[var(--color-accent-ink)]" : "bg-[var(--color-line)] text-[var(--color-muted)]"}`}>{isD9 ? "NRE accounts" : "NRO / savings"}</span></div>
-      <div className="mt-3 text-[28px] font-semibold tracking-tight">{inr(price.you_receive)}</div>
-      <div className="text-[12px] text-[var(--color-muted)]">user receives · rate {price.final_price} INR/{currency}</div>
+      <div className="flex items-center justify-between">
+        <span className={`inline-flex items-center h-6 px-2.5 rounded-full text-[12px] font-medium ${isD9 ? "bg-[var(--color-accent)] text-[var(--color-accent-ink)]" : "bg-[var(--color-line)] text-[var(--color-muted)]"}`}>{isD9 ? "NRE accounts" : "NRO / savings"}</span>
+        <span className="text-[12px] font-semibold text-[var(--color-faint)]">Quote {price.option}</span>
+      </div>
+      <div className="mt-3 text-[28px] font-semibold tracking-tight">{inr(price.to_amount)}</div>
+      <div className="text-[12px] text-[var(--color-muted)]">net to beneficiary · rate {price.rate} INR/{currency}</div>
       <div className="mt-3 pt-3 border-t border-[var(--color-line)] space-y-1.5">
-        {detailed && <Line label="base_price" value={`${price.base_price}`} />}
-        {detailed && <Line label="final_price (incl. % fees + TDS)" value={`${price.final_price}`} />}
-        <Line label={detailed ? "pre_fee_to_amount" : "Converted amount"} value={inr(price.pre_fee_to_amount)} />
-        <Line label={`Service charge (${price.service_charge.amount.toFixed(2)} ${price.service_charge.currency})`} value={`− ${inr(price.service_charge.amount * price.final_price)}`} />
+        <Line label={`Sends (${currency})`} value={cx(price.from_amount.amount, currency)} />
+        <Line label="Service charge (flat)" value={`${cx(price.service_charge.amount, currency)} (≈ ${inr(price.service_charge.amount * price.rate)})`} />
+        <Line label="Converted" value={`${cx(price.principal.amount, currency)} → ${inr(price.gross_inr)}`} />
+        {price.total_fee_inr !== 0 && <Line label="Fees (% on INR)" value={`− ${inr(price.total_fee_inr)}`} />}
         <Line label="Tax (TDS)" value={tdsValue} tone={tds.compensated ? "good" : undefined} />
+        <div className="pt-1.5 mt-0.5 border-t border-[var(--color-line)]"><Line label="Net to beneficiary" value={inr(price.to_amount)} /></div>
       </div>
     </div>
   );
@@ -412,8 +471,8 @@ function Chip({ label, value, mono }: { label: string; value: string; mono?: boo
 
 /* ---------------- 4. create input ---------------- */
 function CreateInputStep(p: {
-  quoteId: string; txnType: TxnType; partyScope: PartyScope; setPartyScope: (v: PartyScope) => void;
-  senderBusiness: boolean; receiverBusiness: boolean; firstParty: boolean;
+  quoteId: string; txnType: TxnType; isNri: boolean;
+  senderBusiness: boolean; receiverBusiness: boolean; firstParty: boolean; mirror: boolean;
   purpose: string; setPurpose: (v: string) => void; sourceIncome: string; setSourceIncome: (v: string) => void;
   sFirst: string; setSFirst: (v: string) => void; sLast: string; setSLast: (v: string) => void; sDob: string; setSDob: (v: string) => void; sNat: string; setSNat: (v: string) => void;
   rFirst: string; setRFirst: (v: string) => void; rLast: string; setRLast: (v: string) => void;
@@ -421,16 +480,14 @@ function CreateInputStep(p: {
   accountType: AccountType; setAccountType: (v: AccountType) => void; accountNo: string; setAccountNo: (v: string) => void; ifsc: string; setIfsc: (v: string) => void;
   nreEnabled: boolean; createRequest: unknown; onBack: () => void; onCreate: () => void;
 }) {
-  const c2c = !p.senderBusiness && !p.receiverBusiness;
   return (
     <Card className="p-6 space-y-5 animate-fadeup">
       <div className="flex items-start justify-between">
         <div><h1 className="text-[20px] font-semibold tracking-tight">Create transaction</h1><p className="text-[13px] text-[var(--color-muted)] mt-0.5">One fat call. No user or bank account exists yet; both are created here.</p></div>
-        <div className="flex flex-col items-end gap-1.5"><Chip label="quote_id" value={p.quoteId} mono /><Chip label="party_scope" value={`${p.firstParty ? "FIRST_PARTY" : "THIRD_PARTY"} (derived)`} /></div>
+        <div className="flex flex-col items-end gap-1.5"><Chip label="quote_id" value={p.quoteId} mono /><Chip label="party_scope" value={`${p.firstParty ? "FIRST_PARTY" : "THIRD_PARTY"} · from is_nri=${p.isNri}`} /></div>
       </div>
       <SectionLabel>Transaction</SectionLabel>
       <div className="grid sm:grid-cols-2 gap-4">
-        {c2c && <Select label="Party scope (C2C)" value={p.partyScope} onChange={(v) => p.setPartyScope(v as PartyScope)} options={[{ value: "FIRST_PARTY", label: "First party (receiver = sender)" }, { value: "THIRD_PARTY", label: "Third party (distinct receiver)" }]} />}
         <Select label="Purpose (code)" value={p.purpose} onChange={p.setPurpose} options={[{ value: "IR001", label: "IR001 — family maintenance" }, { value: "IR005", label: "IR005 — gift" }, { value: "IR006", label: "IR006 — services" }]} />
         <Select label="Source of income" value={p.sourceIncome} onChange={p.setSourceIncome} options={[{ value: "SALARY", label: "Salary" }, { value: "SAVINGS", label: "Savings" }, { value: "BUSINESS_INCOME", label: "Business income" }]} />
       </div>
@@ -447,12 +504,13 @@ function CreateInputStep(p: {
       )}
       <SectionLabel>Receiver + bank (inline · {p.receiverBusiness ? "business · " : ""}beneficiary)</SectionLabel>
       <div className="grid sm:grid-cols-2 gap-4">
-        {p.receiverBusiness ? <Field label="Business name" value={p.rcvBiz} onChange={(e) => p.setRcvBiz(e.target.value)} /> : p.firstParty ? null : <><Field label="Receiver first name" value={p.rFirst} onChange={(e) => p.setRFirst(e.target.value)} /><Field label="Receiver last name" value={p.rLast} onChange={(e) => p.setRLast(e.target.value)} /></>}
+        {p.receiverBusiness ? <Field label="Business name" value={p.rcvBiz} onChange={(e) => p.setRcvBiz(e.target.value)} /> : p.mirror ? null : <><Field label="Receiver first name" value={p.rFirst} onChange={(e) => p.setRFirst(e.target.value)} /><Field label="Receiver last name" value={p.rLast} onChange={(e) => p.setRLast(e.target.value)} /></>}
         <Select label="Bank account type" value={p.accountType} onChange={(v) => p.setAccountType(v as AccountType)} options={[...(p.nreEnabled ? [{ value: "NRE", label: "NRE → NRE payout partner" }] : []), { value: "NRO", label: "NRO → payout partner" }, { value: "SAVINGS", label: "Savings → payout partner" }]} hint="Decides the payout partner, price, and tax" />
         <Field label="Account number" value={p.accountNo} onChange={(e) => p.setAccountNo(e.target.value)} />
         <Field label="IFSC" value={p.ifsc} onChange={(e) => p.setIfsc(e.target.value)} />
       </div>
-      {p.firstParty && <p className="text-[12px] text-[var(--color-faint)]">First party: receiver name, relationship (SELF), and address mirror the sender.</p>}
+      {p.mirror && <p className="text-[12px] text-[var(--color-faint)]">First party (is_nri = true): receiver name, relationship (SELF), and address mirror the sender.</p>}
+      {!p.firstParty && <p className="text-[12px] text-[var(--color-faint)]">Third party (is_nri = false): the receiver is a distinct party from the sender.</p>}
       <div className="flex justify-between"><Button variant="ghost" onClick={p.onBack}>← Back to quote</Button><Button onClick={p.onCreate}>Create transaction →</Button></div>
       <Collapsible title="Fields captured"><FieldsCaptured req={p.createRequest} firstParty={p.firstParty} /></Collapsible>
       <EngineeringPanel blocks={[{ label: "POST /v2/wallet/transaction — request (fat body)", data: p.createRequest }]} />
@@ -479,22 +537,22 @@ function Phase({ title, active, children }: { title: string; active: boolean; ch
 }
 
 /* ---------------- 6. done ---------------- */
-function DoneStep({ routing, amount, currency, business, createRequest, onRestart }: { routing: RoutingDecision; amount: number; currency: string; business: boolean; createRequest: unknown; onRestart: () => void }) {
+function DoneStep({ routing, currency, business, createRequest, onRestart }: { routing: RoutingDecision; currency: string; business: boolean; createRequest: unknown; onRestart: () => void }) {
   const c = routing.chosen;
   const tds = c.tax.tds;
-  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `₹${(tds.amount_inr ?? 0).toLocaleString("en-IN")} absorbed by Saber` : `${inr(tds.amount_inr ?? 0)} · in final_price`;
+  const tdsValue = !tds.applicable ? "none" : tds.compensated ? `${inr(tds.amount_inr ?? 0)} absorbed by Saber` : `− ${inr(tds.amount_inr ?? 0)}`;
   return (
     <Card className="p-6 space-y-5 animate-fadeup">
       <div className="flex items-center gap-2.5"><StatusPill tone="good">COMPLETED</StatusPill><span className="text-[13px] text-[var(--color-muted)]">payout settled</span></div>
       <div className="rounded-[14px] border border-[var(--color-line)] p-5 space-y-1.5">
-        <Line label="Sold" value={`${amount} ${currency}`} />
+        <Line label={`Sent (${currency})`} value={cx(c.from_amount.amount, currency)} />
+        <Line label="Service charge (flat)" value={cx(c.service_charge.amount, currency)} />
         <Line label="Payout partner" value={`${routing.partner.AggregatorName} (${routing.partner.type === "D9" ? "traditional" : "stables"})`} />
         <Line label="Account type" value={routing.account_type} />
-        <Line label="Locked rate" value={`${c.final_price} INR/${currency}`} />
-        <Line label="Converted amount" value={inr(c.pre_fee_to_amount)} />
-        <Line label={`Service charge (${c.service_charge.amount.toFixed(2)} ${c.service_charge.currency})`} value={`− ${inr(c.service_charge.amount * c.final_price)}`} />
+        <Line label="Locked rate" value={`${c.rate} INR/${currency}`} />
+        <Line label="Converted" value={`${cx(c.principal.amount, currency)} → ${inr(c.gross_inr)}`} />
         <Line label="TDS" value={tdsValue} tone={tds.compensated ? "good" : undefined} />
-        <div className="pt-2 mt-1 border-t border-[var(--color-line)]"><Line label="Net to beneficiary" value={inr(c.you_receive)} /></div>
+        <div className="pt-2 mt-1 border-t border-[var(--color-line)]"><Line label="Net to beneficiary" value={inr(c.to_amount)} /></div>
       </div>
       <Collapsible title="Checks · everything that ran"><div className="space-y-4"><CheckGroup title="Routing" items={routing.steps} /><CheckGroup title={business ? "KYB / AML" : "KYC / AML"} items={kycChecks(business)} /><CheckGroup title="Lifecycle" items={lifecycleChecks(routing)} /></div></Collapsible>
       <EngineeringPanel blocks={[{ label: "POST /v2/wallet/transaction — request (this transaction)", data: createRequest }]} />
@@ -503,55 +561,57 @@ function DoneStep({ routing, amount, currency, business, createRequest, onRestar
   );
 }
 
-/* ---------------- calculator (pure inputs, shared config) ---------------- */
+/* ---------------- calculator (two columns, shared config) ---------------- */
 function CalcView({ form, set, cfg, onBack }: { form: CfgForm; set: <K extends keyof CfgForm>(k: K, v: CfgForm[K]) => void; cfg: ClientConfig; onBack: () => void }) {
-  const [amount, setAmount] = useState("100");
-  const [isNri, setIsNri] = useState(false);
-  const rails: PartnerType[] = ["RPFS", ...(form.nreOn ? (["D9"] as PartnerType[]) : [])];
   return (
     <Card className="p-6 space-y-5 animate-fadeup">
       <div className="flex items-start justify-between">
-        <div><h1 className="text-[20px] font-semibold tracking-tight">Pricing calculator</h1><p className="text-[13px] text-[var(--color-muted)] mt-0.5">Enter values and watch the price change. This is the same config the flow uses, so your edits carry over.</p></div>
+        <div><h1 className="text-[20px] font-semibold tracking-tight">Pricing calculator</h1><p className="text-[13px] text-[var(--color-muted)] mt-0.5">Same two-column layout as the configurator. Edit the config; the quote updates live. Edits carry into the flow.</p></div>
         <Button variant="ghost" onClick={onBack}>← Back to flow</Button>
       </div>
-      <ConfigBlock title="Pricing config"><PricingEditor form={form} set={set} /></ConfigBlock>
-      <ConfigBlock title="Try it">
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label={`Sell (${form.ccy})`} inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ""))} />
-          <Select label="Recipient NRI" value={isNri ? "yes" : "no"} onChange={(v) => setIsNri(v === "yes")} options={[{ value: "no", label: "Resident (TDS)" }, { value: "yes", label: "NRI (no TDS)" }]} />
+      <div className="grid lg:grid-cols-2 gap-6">
+        <div className="space-y-3">
+          <ColTitle>Configuration</ColTitle>
+          <Collapsible title="Pricing configuration" defaultOpen><PricingEditor form={form} set={set} /></Collapsible>
+          <Collapsible title="Partner mapping configuration"><PartnerEditor form={form} set={set} /></Collapsible>
         </div>
-      </ConfigBlock>
-      <ConfigBlock title="Resulting prices"><div className="grid md:grid-cols-2 gap-4">{rails.map((r) => <PriceCard key={r} price={priceFor(cfg, r, Number(amount) || 0, isNri)} currency={form.ccy} />)}</div></ConfigBlock>
-      <ConfigBlock title="How it's calculated"><CalcBreakdown cfg={cfg} amount={Number(amount) || 0} isNri={isNri} /></ConfigBlock>
+        <div className="space-y-3">
+          <ColTitle>Quote</ColTitle>
+          <QuotePreview cfg={cfg} showCalc />
+        </div>
+      </div>
       <div className="flex justify-end"><Button onClick={onBack}>Use this config in the flow →</Button></div>
     </Card>
   );
 }
-function CalcBreakdown({ cfg, amount, isNri }: { cfg: ClientConfig; amount: number; isNri: boolean }) {
+function CalcBreakdown({ cfg, basis, value, isNri }: { cfg: ClientConfig; basis: AmountBasis; value: number; isNri: boolean }) {
   const rails: PartnerType[] = [cfg.partner_config.payout_partner.type, ...(cfg.partner_config.nre_payout_partner ? [cfg.partner_config.nre_payout_partner.type] : [])];
-  return <div className="space-y-4">{rails.map((r) => <CalcCard key={r} ex={explainPrice(cfg, r, amount, isNri)} currency={cfg.from_currency} />)}</div>;
+  return <div className="space-y-4">{rails.map((r) => <CalcCard key={r} ex={explainPrice(cfg, r, basis, value, isNri)} currency={cfg.from_currency} />)}</div>;
 }
 function CalcCard({ ex, currency }: { ex: PriceExplain; currency: string }) {
   const isD9 = ex.rail === "D9";
-  const tdsLine = !ex.tds_applicable ? "no TDS (NRI or stables tds=0)" : ex.compensated ? `1% absorbed by Saber (compensate_tds), not folded in` : `× (1 − tds)`;
-  const pctFeeDetail = ex.net_platform_fee === 0 && ex.client_fee === 0
-    ? "none configured (all 0) — final_price = base_price before TDS"
-    : `× (1 − ${ex.net_platform_fee}×(1+${ex.tax_on_fee}) − ${ex.client_fee})`;
-  const payoutPreFixed = ex.pre_fee_to_amount; // amount × final_price
-  const tdsFolded = ex.tds_applicable && !ex.compensated;
-  const preTDS = tdsFolded ? Math.round((ex.final_price / (1 - ex.tds_rate)) * 100) / 100 : ex.final_price;
+  const dedItems: string[] = [];
+  if (ex.platform_inr) dedItems.push(`platform ${inr(ex.platform_inr)}`);
+  if (ex.gst_inr) dedItems.push(`GST ${inr(ex.gst_inr)}`);
+  if (ex.client_fee_inr) dedItems.push(`client fee ${inr(ex.client_fee_inr)}`);
+  if (ex.discount_inr) dedItems.push(`less discount ${inr(ex.discount_inr)}`);
+  if (ex.tds_applicable && !ex.compensated) dedItems.push(`TDS ${inr(ex.tds_inr)}`);
+  const dedDetail = dedItems.length ? dedItems.join(" + ") : ex.tds_applicable && ex.compensated ? "TDS absorbed by Saber (compensate_tds)" : "no fees or TDS";
+  const spreadLabel = `Apply spread (${pct(ex.spread)}${ex.lock_spread ? ` + price-lock ${pct(ex.lock_spread)}` : ""})`;
+  const svcStep = ex.basis === "from_amount"
+    ? { label: `Deduct service charge (${ex.service_charge} ${ex.currency}, flat)`, detail: `${ex.from_amount} − ${ex.service_charge} = ${ex.principal_crypto} ${currency} converted`, value: `${ex.principal_crypto} ${currency}` }
+    : { label: `Add service charge (${ex.service_charge} ${ex.currency}, flat)`, detail: `sender sends ${ex.principal_crypto} + ${ex.service_charge} = ${ex.from_amount} ${currency}`, value: `${ex.from_amount} ${currency}` };
   return (
     <div className={`rounded-[14px] border p-5 ${isD9 ? "border-[var(--color-accent)]" : "border-[var(--color-line)]"}`}>
-      <div className="text-[12px] font-semibold text-[var(--color-muted)] mb-3">{isD9 ? "NRE payout partner (D9, traditional)" : "Payout partner (RPFS, stables)"}</div>
+      <div className="text-[12px] font-semibold text-[var(--color-muted)] mb-3">Quote {ex.option} · {isD9 ? "NRE (D9, traditional)" : "RPFS (stables)"}</div>
       <ol className="space-y-2 text-[13px]">
         <CalcStep n="1" label="Source price" detail={ex.pinned ? `static OTC, pinned at ${ex.min}` : `live ${ex.source} (price stream)`} value={`${ex.source}`} />
-        <CalcStep n="2" label={`Apply client spread (${pct(ex.spread)})`} detail={ex.pinned ? "ignored — pinned band overrides the spread" : `${ex.source} × (1 ${ex.spread < 0 ? "−" : "+"} ${Math.abs(ex.spread * 100).toFixed(2)}%)`} value={`${ex.post_spread}`} />
-        <CalcStep n="3" label="Clamp to band → base_price" detail={ex.pinned ? `pinned ${ex.min}` : `floor ${ex.min}, ceiling ${ex.max}`} value={`${ex.base_price}`} highlight />
-        <CalcStep n="4" label="Fold % fees (platform − discount, GST, client_fee)" detail={pctFeeDetail} value={`${preTDS}`} />
-        <CalcStep n="5" label="Fold TDS → final_price" detail={tdsLine} value={`${ex.final_price}`} highlight />
-        <CalcStep n="6" label={`pre_fee_to_amount = ${ex.amount} ${currency} × final_price`} detail={`${ex.amount} × ${ex.final_price}`} value={inr(payoutPreFixed)} />
-        <CalcStep n="7" label={`Service charge (${ex.service_charge_amount.toFixed(2)} ${ex.service_charge_currency} · flat, separate object)`} detail="not folded into final_price — charged in USDT, over and above" value={`− ${inr(ex.service_charge_inr)}`} />
-        <CalcStep n="=" label="Net to user (to_amount)" detail={`(${ex.amount} − ${ex.service_charge_amount.toFixed(2)}) × final_price`} value={inr(ex.net)} highlight />
+        <CalcStep n="2" label={spreadLabel} detail={ex.pinned ? "ignored — pinned band overrides the spread" : `${ex.source} × (1 ${ex.spread < 0 ? "−" : "+"} ${Math.abs(ex.spread * 100).toFixed(2)}%${ex.lock_spread ? ` ${ex.lock_spread < 0 ? "−" : "+"} ${Math.abs(ex.lock_spread * 100).toFixed(2)}%` : ""})`} value={`${ex.post_spread}`} />
+        <CalcStep n="3" label="Clamp to band → rate" detail={ex.pinned ? `pinned ${ex.min}` : `floor ${ex.min}, ceiling ${ex.max}`} value={`${ex.rate}`} highlight />
+        <CalcStep n="4" label={svcStep.label} detail={svcStep.detail} value={svcStep.value} />
+        <CalcStep n="5" label="Convert to INR (gross)" detail={`${ex.principal_crypto} ${currency} × ${ex.rate}`} value={inr(ex.gross_inr)} highlight />
+        <CalcStep n="6" label="Deduct fees + TDS on INR" detail={dedDetail} value={ex.total_deductions_inr ? `− ${inr(ex.total_deductions_inr)}` : "− ₹0"} />
+        <CalcStep n="=" label="Net to beneficiary (to_amount)" detail={`gross ${inr(ex.gross_inr)} − deductions`} value={inr(ex.to_amount)} highlight />
       </ol>
     </div>
   );
@@ -566,11 +626,11 @@ function CalcStep({ n, label, detail, value, highlight }: { n: string; label: st
 }
 
 /* ---------------- shared: collapsible + checks + fields ---------------- */
-function Collapsible({ title, children }: { title: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
+function Collapsible({ title, children, defaultOpen }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(!!defaultOpen);
   return (
-    <div className="border border-[var(--color-line)] rounded-[var(--radius)] overflow-hidden mt-3">
-      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center justify-between px-4 h-11 text-[13px] font-medium text-[var(--color-muted)] hover:bg-[var(--color-bg)]"><span>{title}</span><span className="text-[var(--color-faint)]">{open ? "Hide" : "Show"}</span></button>
+    <div className="border border-[var(--color-line)] rounded-[var(--radius)] overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center justify-between px-4 h-11 text-[13px] font-medium text-[var(--color-ink)] hover:bg-[var(--color-bg)]"><span>{title}</span><span className="text-[var(--color-faint)]">{open ? "Hide" : "Show"}</span></button>
       {open && <div className="border-t border-[var(--color-line)] p-4 bg-[var(--color-bg)] animate-fadeup">{children}</div>}
     </div>
   );
@@ -592,7 +652,7 @@ function FieldsCaptured({ req, firstParty }: { req: unknown; firstParty: boolean
       <FieldGroup title="Transaction" fields={Object.keys(r).filter((k) => k !== "sender" && k !== "receiver")} />
       <FieldGroup title="Sender" fields={fieldPaths(r.sender)} />
       <FieldGroup title="Receiver + bank" fields={fieldPaths(r.receiver)} />
-      <div className="text-[12px] text-[var(--color-muted)] rounded-[var(--radius)] bg-[var(--color-surface)] border border-[var(--color-line)] px-3 py-2">{firstParty ? "First party: receiver first/last name, relationship (SELF), and address mirror the sender. The bank account is still captured." : "Third party: the receiver is a distinct party, so its full identity, address, and bank account are captured alongside the sender."}</div>
+      <div className="text-[12px] text-[var(--color-muted)] rounded-[var(--radius)] bg-[var(--color-surface)] border border-[var(--color-line)] px-3 py-2">{firstParty ? "First party (is_nri = true): receiver first/last name, relationship (SELF), and address mirror the sender. The bank account is still captured." : "Third party (is_nri = false): the receiver is a distinct party, so its full identity, address, and bank account are captured alongside the sender."}</div>
     </div>
   );
 }
